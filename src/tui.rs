@@ -18,7 +18,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use ratatui_image::{Image as TerminalImage, Resize, picker::Picker, protocol::Protocol};
+use ratatui_image::{Resize, StatefulImage, picker::Picker, protocol::StatefulProtocol};
 
 use crate::{
     app::AppService,
@@ -47,7 +47,7 @@ struct App {
     status: String,
     result: Option<JudgeResult>,
     image_urls: Vec<String>,
-    image: Option<Protocol>,
+    image: Option<StatefulProtocol>,
     confirm_submit: bool,
     pending_submission: Option<WorkspaceEntry>,
 }
@@ -87,7 +87,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
 
     let image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let mut guard = TerminalGuard::enter()?;
-    guard.terminal.draw(|frame| draw(frame, &app))?;
+    guard.terminal.draw(|frame| draw(frame, &mut app))?;
     loop {
         if !event::poll(std::time::Duration::from_millis(200))? {
             continue;
@@ -104,7 +104,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 KeyCode::Char('y' | 'Y') => {
                     app.confirm_submit = false;
                     app.status = "Submitting…".into();
-                    guard.terminal.draw(|frame| draw(frame, &app))?;
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
                     if let Err(error) = submit_current(&mut app, config, service).await {
                         app.set_error(error);
                     }
@@ -116,7 +116,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 }
                 _ => app.status = "Submit? Press y to confirm or n/Esc to cancel".into(),
             }
-            guard.terminal.draw(|frame| draw(frame, &app))?;
+            guard.terminal.draw(|frame| draw(frame, &mut app))?;
             continue;
         }
 
@@ -133,7 +133,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 }
                 _ => {}
             }
-            guard.terminal.draw(|frame| draw(frame, &app))?;
+            guard.terminal.draw(|frame| draw(frame, &mut app))?;
             continue;
         }
 
@@ -147,7 +147,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
                 KeyCode::Enter => {
                     app.status = "Loading problem…".into();
-                    guard.terminal.draw(|frame| draw(frame, &app))?;
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
                     if let Err(error) = open_selected(&mut app, service).await {
                         app.set_error(error);
                     }
@@ -158,7 +158,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     if app.image.take().is_some() {
                         app.status = "Closed image".into();
-                        guard.terminal.draw(|frame| draw(frame, &app))?;
+                        guard.terminal.draw(|frame| draw(frame, &mut app))?;
                         continue;
                     }
                     app.view = View::Browser;
@@ -178,7 +178,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 }
                 KeyCode::Char('r') => {
                     app.status = "Running sample testcase…".into();
-                    guard.terminal.draw(|frame| draw(frame, &app))?;
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
                     if let Err(error) = run_current(&mut app, config, service).await {
                         app.set_error(error);
                     }
@@ -193,21 +193,21 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 },
                 KeyCode::Tab => {
                     app.status = "Loading editorial…".into();
-                    guard.terminal.draw(|frame| draw(frame, &app))?;
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
                     if let Err(error) = load_editorial(&mut app, service).await {
                         app.set_error(error);
                     }
                 }
                 KeyCode::Char('m') => {
                     app.status = "Loading submissions…".into();
-                    guard.terminal.draw(|frame| draw(frame, &app))?;
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
                     if let Err(error) = load_submissions(&mut app, service).await {
                         app.set_error(error);
                     }
                 }
                 KeyCode::Char('i') => {
                     app.status = "Loading image…".into();
-                    guard.terminal.draw(|frame| draw(frame, &app))?;
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
                     if let Err(error) = load_image(&mut app, service, &image_picker).await {
                         app.set_error(error);
                     }
@@ -216,7 +216,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
             },
         }
         sync_document_scroll(&mut app);
-        guard.terminal.draw(|frame| draw(frame, &app))?;
+        guard.terminal.draw(|frame| draw(frame, &mut app))?;
     }
     Ok(())
 }
@@ -351,11 +351,7 @@ async fn load_image(app: &mut App, service: &AppService<'_>, picker: &Picker) ->
         Err(error) => return Err(error.into()),
     };
     let decoded = decode_image(&bytes)?;
-    app.image = Some(picker.new_protocol(
-        decoded,
-        ratatui::layout::Size::new(80, 24),
-        Resize::Fit(None),
-    )?);
+    app.image = Some(picker.new_resize_protocol(decoded));
     app.status = "Image preview; Esc closes it".into();
     Ok(())
 }
@@ -410,7 +406,7 @@ fn sync_document_scroll(app: &mut App) {
     app.document = std::mem::take(&mut app.document).scroll((app.scroll, 0));
 }
 
-fn draw(frame: &mut Frame, app: &App) {
+fn draw(frame: &mut Frame, app: &mut App) {
     match app.view {
         View::Browser => draw_browser(frame, app),
         View::Problem => draw_problem(frame, app),
@@ -494,7 +490,7 @@ fn draw_browser(frame: &mut Frame, app: &App) {
     );
 }
 
-fn draw_problem(frame: &mut Frame, app: &App) {
+fn draw_problem(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -535,14 +531,15 @@ fn draw_problem(frame: &mut Frame, app: &App) {
             .constraints([Constraint::Percentage(100)])
             .split(chunks[1])
     };
-    if let Some(image) = &app.image {
+    if let Some(image) = &mut app.image {
         frame.render_widget(
             Block::default().borders(Borders::ALL).title(" Image "),
             body_chunks[0],
         );
-        frame.render_widget(
-            TerminalImage::new(image).allow_clipping(true),
+        frame.render_stateful_widget(
+            StatefulImage::default().resize(Resize::Fit(None)),
             body_chunks[0].inner(ratatui::layout::Margin::new(1, 1)),
+            image,
         );
     } else {
         frame.render_widget(&app.document, body_chunks[0]);

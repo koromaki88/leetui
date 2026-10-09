@@ -141,6 +141,7 @@ fn credentials_from_environment(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn test_paths(root: &std::path::Path) -> Paths {
         Paths {
             config: root.join("config/config.toml"),
