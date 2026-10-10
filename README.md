@@ -28,7 +28,7 @@ Premium problems are hidden by default, and `leetui` does not attempt to bypass 
 cargo build --release
 ```
 
-The binary is `target/release/leetui`. Rust 1.88 or newer is required. Rustls is used for HTTPS,
+The binary is `target/release/leetui`. Rust 1.90 or newer is required. Rustls is used for HTTPS,
 so OpenSSL is not required.
 
 ## Install from source
