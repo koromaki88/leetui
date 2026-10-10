@@ -31,6 +31,37 @@ cargo build --release
 The binary is `target/release/leetui`. Rust 1.88 or newer is required. Rustls is used for HTTPS,
 so OpenSSL is not required.
 
+## Install from source
+
+From the project directory, install `leetui` for the current user using the dependency versions
+recorded in `Cargo.lock`:
+
+```sh
+cargo install --path . --locked
+```
+
+Cargo installs the binary to `~/.cargo/bin/leetui`. Rustup normally adds this directory to
+`PATH`. If `leetui` is not found, add it to your shell configuration:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+After updating the source, reinstall the binary with:
+
+```sh
+cargo install --path . --locked --force
+```
+
+To remove it:
+
+```sh
+cargo uninstall leetui
+```
+
+Do not run `cargo install` with `sudo`; user-local installation does not require elevated
+permissions.
+
 ## Authentication
 
 Problem discovery and statements work anonymously. Run, submit, personal status, and submission
