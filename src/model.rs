@@ -81,7 +81,6 @@ pub struct SubmissionSummary {
     pub runtime: Option<String>,
     pub timestamp: String,
     pub url: Option<String>,
-    pub is_pending: bool,
     pub memory: Option<String>,
 }
 
@@ -146,11 +145,10 @@ mod tests {
             "runtime": "0 ms",
             "timestamp": "1700000000",
             "url": "/submissions/detail/123/",
-            "isPending": false,
+            "isPending": "Not Pending",
             "memory": "2 MB"
         }))
         .unwrap();
         assert_eq!(submission.status_display, "Accepted");
-        assert!(!submission.is_pending);
     }
 }

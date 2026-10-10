@@ -485,7 +485,7 @@ fn draw_browser(frame: &mut Frame, app: &App) {
         &mut state,
     );
     frame.render_widget(
-        Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(app.status.as_str()).style(status_bar_style()),
         chunks[2],
     );
 }
@@ -557,9 +557,13 @@ fn draw_problem(frame: &mut Frame, app: &mut App) {
         );
     }
     frame.render_widget(
-        Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(app.status.as_str()).style(status_bar_style()),
         chunks[2],
     );
+}
+
+fn status_bar_style() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
 struct TerminalGuard {

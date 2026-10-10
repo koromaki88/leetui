@@ -227,7 +227,7 @@ query officialSolution($titleSlug: String!) {
 query Submissions($offset: Int!, $limit: Int!, $lastKey: String, $questionSlug: String!) {
   submissionList(offset: $offset, limit: $limit, lastKey: $lastKey, questionSlug: $questionSlug) {
     hasNext lastKey
-    submissions { id statusDisplay lang runtime timestamp url isPending memory }
+    submissions { id statusDisplay lang runtime timestamp url memory }
   }
 }"#;
         let mut submissions = Vec::new();
