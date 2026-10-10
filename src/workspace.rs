@@ -9,7 +9,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::{config::Config, document::statement_markdown, fsutil::atomic_write, model::Problem};
+use crate::{
+    config::Config, document::statement_markdown, fsutil::atomic_write, language, model::Problem,
+};
 
 const META_FILE: &str = ".leetui.toml";
 
@@ -71,15 +73,28 @@ pub fn prepare_in(
             problem.title_slug
         );
     }
+    let requested_language = requested_language.map(language::normalize).transpose()?;
+    let existing_language = existing
+        .as_ref()
+        .map(|meta| language::normalize(&meta.language))
+        .transpose()?;
     let language = requested_language
-        .or_else(|| existing.as_ref().map(|meta| meta.language.as_str()))
-        .unwrap_or(default_language);
+        .or(existing_language)
+        .unwrap_or(language::normalize(default_language)?);
     let snippet = problem
         .code_snippets
         .iter()
         .find(|snippet| snippet.lang_slug == language)
-        .with_context(|| format!("problem has no `{language}` starter code"))?;
-    let solution_name = format!("solution.{}", extension(language));
+        .with_context(|| {
+            let available = problem
+                .code_snippets
+                .iter()
+                .map(|snippet| snippet.lang_slug.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("problem has no `{language}` starter code; available languages: {available}")
+        })?;
+    let solution_name = format!("solution.{}", extension(&language));
     let solution = directory.join(&solution_name);
     create_once(&solution, snippet.code.as_bytes())?;
 
@@ -105,7 +120,7 @@ pub fn prepare_in(
         slug: problem.title_slug.clone(),
         question_id: problem.question_id.clone(),
         frontend_id: problem.question_frontend_id.clone(),
-        language: language.to_owned(),
+        language,
         solution: PathBuf::from(&solution_name),
     };
     atomic_write(
@@ -140,8 +155,9 @@ fn load_meta(directory: &Path) -> Result<Option<WorkspaceMeta>> {
     if !path.exists() {
         return Ok(None);
     }
-    let meta: WorkspaceMeta = toml::from_str(&fs::read_to_string(&path)?)
+    let mut meta: WorkspaceMeta = toml::from_str(&fs::read_to_string(&path)?)
         .with_context(|| format!("invalid workspace metadata in {}", path.display()))?;
+    meta.language = language::normalize(&meta.language)?;
     crate::cache::validate_slug(&meta.slug)?;
     validate_solution_path(&meta.solution)?;
     Ok(Some(meta))
@@ -178,7 +194,8 @@ pub fn from_path(path: &Path) -> Result<WorkspaceEntry> {
             directory.display()
         );
     }
-    let meta: WorkspaceMeta = toml::from_str(&fs::read_to_string(&meta_path)?)?;
+    let mut meta: WorkspaceMeta = toml::from_str(&fs::read_to_string(&meta_path)?)?;
+    meta.language = language::normalize(&meta.language)?;
     crate::cache::validate_slug(&meta.slug)?;
     validate_solution_path(&meta.solution)?;
     let solution = if path.is_file() {
@@ -264,6 +281,25 @@ mod tests {
         assert_eq!(extension("golang"), "go");
         assert_eq!(extension("python3"), "py");
         assert_eq!(extension("custom"), "custom");
+    }
+
+    #[test]
+    fn common_alias_selects_canonical_starter_code() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut problem = problem();
+        problem.code_snippets.push(crate::model::CodeSnippet {
+            lang: "C++".into(),
+            lang_slug: "cpp".into(),
+            code: "cpp starter".into(),
+        });
+        let config = Config {
+            default_language: "c++".into(),
+            editor: Vec::new(),
+            workspace: directory.path().into(),
+        };
+        let entry = prepare(&config, &problem, None).unwrap();
+        assert_eq!(entry.meta.language, "cpp");
+        assert_eq!(entry.solution.file_name().unwrap(), "solution.cpp");
     }
 
     fn problem() -> Problem {

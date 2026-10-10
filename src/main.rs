@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod document;
 mod fsutil;
+mod language;
 mod model;
 mod tui;
 mod workspace;
@@ -16,7 +17,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::{
     app::{AppService, resolve_slug},
     client::LeetCodeClient,
-    config::{Config, Credentials, Paths},
+    config::{Config, Credentials, Paths, expand_home},
     document::statement_markdown,
     model::JudgeResult,
 };
@@ -72,9 +73,9 @@ enum Command {
     },
     /// Print or update configuration.
     Config {
-        /// One of: language, workspace, editor.
+        /// One of: language, workspace, editor. Run without arguments to print the effective TOML.
         key: Option<String>,
-        /// New value. Editor commands are parsed like a shell command line without expansion.
+        /// New value. Editor commands are split into one executable plus its argument vector.
         value: Option<String>,
     },
 }
@@ -100,6 +101,7 @@ struct ListArgs {
 #[derive(Args)]
 struct TargetArgs {
     target: String,
+    /// LeetCode language slug or common alias, such as `cpp` or `c++`.
     #[arg(short, long)]
     lang: Option<String>,
 }
@@ -107,6 +109,7 @@ struct TargetArgs {
 #[derive(Args)]
 struct RunArgs {
     target: String,
+    /// LeetCode language slug or common alias, such as `cpp` or `c++`.
     #[arg(short, long)]
     lang: Option<String>,
     #[arg(short, long, conflicts_with = "input_file")]
@@ -120,6 +123,7 @@ struct RunArgs {
 #[derive(Args)]
 struct SubmitArgs {
     target: String,
+    /// LeetCode language slug or common alias, such as `cpp` or `c++`.
     #[arg(short, long)]
     lang: Option<String>,
     /// Skip the interactive confirmation.
@@ -431,20 +435,6 @@ fn print_judge_result(result: &JudgeResult) {
     }
 }
 
-fn expand_home(value: &str) -> PathBuf {
-    if value == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(value));
-    }
-    if let Some(rest) = value.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(value)
-}
-
 fn split_command(value: &str) -> Result<Vec<String>> {
     let args = shell_words::split(value).context("invalid editor command")?;
     if args.is_empty() {
@@ -462,19 +452,25 @@ fn configure(
     if let Some(key) = key {
         let value = value.context("a value is required when setting a configuration key")?;
         match key.as_str() {
-            "language" => config.default_language = value,
-            "workspace" => config.workspace = expand_home(&value),
+            "language" => config.default_language = language::normalize(&value)?,
+            "workspace" => config.workspace = expand_home(PathBuf::from(value)),
             "editor" => config.editor = split_command(&value)?,
             _ => bail!("unknown configuration key `{key}`; use language, workspace, or editor"),
         }
         config.save(paths)?;
+        match key.as_str() {
+            "language" => println!("Default language: {}", config.default_language),
+            "workspace" => println!("Workspace: {}", config.workspace.display()),
+            "editor" => println!("Editor command argv: {:?}", config.editor),
+            _ => unreachable!(),
+        }
         println!("Updated {}.", paths.config.display());
         return Ok(());
     }
     println!("{}", toml::to_string_pretty(&config)?);
-    println!("config_path = {:?}", paths.config);
-    println!("cache_path = {:?}", paths.cache);
-    println!("credentials_path = {:?}", paths.credentials);
+    println!("# Config file: {}", paths.config.display());
+    println!("# Cache directory: {}", paths.cache.display());
+    println!("# Credentials file: {}", paths.credentials.display());
     Ok(())
 }
 
@@ -489,6 +485,12 @@ mod tests {
             ["code", "--wait", "{dir}"]
         );
         assert!(split_command("code '").is_err());
+    }
+
+    #[test]
+    fn editor_config_is_one_argv_array() {
+        let command = split_command("nvim {file}").unwrap();
+        assert_eq!(command, ["nvim", "{file}"]);
     }
 
     #[test]

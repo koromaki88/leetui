@@ -6,6 +6,7 @@ use crate::{
     cache,
     client::LeetCodeClient,
     config::{Config, Paths},
+    language,
     model::{Editorial, JudgeResult, Problem, SubmissionDetails, SubmissionSummary},
     workspace::{self, WorkspaceEntry},
 };
@@ -72,22 +73,23 @@ impl<'a> AppService<'a> {
         target: &str,
         language: Option<&str>,
     ) -> Result<WorkspaceEntry> {
+        let language = language.map(language::normalize).transpose()?;
         let path = Path::new(target);
         if path.exists() {
             let existing = workspace::from_path(path)?;
-            if language.is_none() || language == Some(existing.meta.language.as_str()) {
+            if language.is_none() || language.as_deref() == Some(existing.meta.language.as_str()) {
                 return Ok(existing);
             }
             let problem = self.problem(&existing.meta.slug, false).await?;
             return workspace::prepare_in(
                 &existing.directory,
                 &problem,
-                language,
+                language.as_deref(),
                 &config.default_language,
             );
         }
         let problem = self.problem(target, false).await?;
-        workspace::prepare(config, &problem, language)
+        workspace::prepare(config, &problem, language.as_deref())
     }
 
     pub async fn run_workspace(&self, entry: &WorkspaceEntry, input: &str) -> Result<JudgeResult> {

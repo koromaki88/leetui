@@ -1,13 +1,16 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use serde::{Deserialize, Serialize};
 
-use crate::fsutil::atomic_write;
+use crate::{fsutil::atomic_write, language};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub default_language: String,
     pub editor: Vec<String>,
@@ -16,8 +19,8 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
+        let home = BaseDirs::new()
+            .map(|directories| directories.home_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
         Self {
             default_language: "rust".into(),
@@ -71,20 +74,35 @@ impl Paths {
 impl Config {
     pub fn load(paths: &Paths) -> Result<Self> {
         if !paths.config.exists() {
-            return Ok(Self::default());
+            return Self::default().normalized();
         }
-        toml::from_str(&fs::read_to_string(&paths.config)?)
+        let config = parse_config(&fs::read_to_string(&paths.config)?)
+            .with_context(|| format!("invalid configuration in {}", paths.config.display()))?;
+        config
+            .normalized()
             .with_context(|| format!("invalid configuration in {}", paths.config.display()))
     }
 
     pub fn save(&self, paths: &Paths) -> Result<()> {
+        let config = self.clone().normalized()?;
         paths.ensure()?;
-        atomic_write(&paths.config, toml::to_string_pretty(self)?.as_bytes())?;
+        atomic_write(&paths.config, toml::to_string_pretty(&config)?.as_bytes())?;
         Ok(())
+    }
+
+    fn normalized(mut self) -> Result<Self> {
+        self.default_language = language::normalize(&self.default_language)?;
+        self.workspace = expand_home(self.workspace);
+        if self.workspace.as_os_str().is_empty() {
+            bail!("workspace path cannot be empty");
+        }
+        validate_editor(&self.editor)?;
+        Ok(self)
     }
 
     pub fn editor_command(&self) -> Result<Vec<String>> {
         if !self.editor.is_empty() {
+            validate_editor(&self.editor)?;
             return Ok(self.editor.clone());
         }
         for key in ["VISUAL", "EDITOR"] {
@@ -92,11 +110,44 @@ impl Config {
                 let command = shell_words::split(&value)
                     .with_context(|| format!("invalid command in ${key}"))?;
                 if !command.is_empty() {
+                    validate_editor(&command)?;
                     return Ok(command);
                 }
             }
         }
         bail!("no editor configured; set $VISUAL, $EDITOR, or editor in config.toml")
+    }
+}
+
+fn parse_config(contents: &str) -> Result<Config> {
+    let mut table: toml::Table = toml::from_str(contents)?;
+    // `page_size` existed in early versions but never affected behavior. Drop
+    // it during loading so old generated configuration remains usable while
+    // all other unknown keys are still reported as mistakes.
+    table.remove("page_size");
+    Ok(toml::Value::Table(table).try_into()?)
+}
+
+fn validate_editor(command: &[String]) -> Result<()> {
+    match command.first() {
+        None => Ok(()),
+        Some(executable) if !executable.is_empty() => Ok(()),
+        _ => bail!("the first editor array element must be a non-empty executable name"),
+    }
+}
+
+pub fn expand_home(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    let Ok(rest) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    let Some(home) = BaseDirs::new().map(|directories| directories.home_dir().to_path_buf()) else {
+        return path.to_path_buf();
+    };
+    if rest.as_os_str().is_empty() {
+        home
+    } else {
+        home.join(rest)
     }
 }
 
@@ -189,5 +240,37 @@ mod tests {
             .unwrap();
         assert_eq!(credentials.session, "session");
         assert_eq!(credentials.csrf, "csrf");
+    }
+
+    #[test]
+    fn config_normalizes_language_and_validates_editor() {
+        let config: Config = toml::from_str(
+            r#"
+default_language = "C++"
+editor = ["nvim", "{file}"]
+workspace = "workspace"
+"#,
+        )
+        .unwrap();
+        let config = config.normalized().unwrap();
+        assert_eq!(config.default_language, "cpp");
+        assert_eq!(config.editor, ["nvim", "{file}"]);
+
+        let invalid = Config {
+            editor: vec![String::new()],
+            ..Config::default()
+        };
+        assert!(invalid.normalized().is_err());
+    }
+
+    #[test]
+    fn config_rejects_unknown_fields() {
+        assert!(parse_config("editors = ['nvim']").is_err());
+    }
+
+    #[test]
+    fn config_migrates_legacy_page_size() {
+        let config = parse_config("page_size = 50").unwrap();
+        assert_eq!(config.default_language, "rust");
     }
 }

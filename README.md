@@ -106,16 +106,106 @@ Numeric problem IDs and LeetCode problem URLs are also accepted.
 
 ## Configuration
 
+Print the effective configuration and its location with:
+
 ```sh
-leetui config language rust
-leetui config workspace '~/leetcode'
-leetui config editor 'nvim {file}'
-leetui config editor 'code --wait {dir}'
 leetui config
 ```
 
-If no editor command is configured, `$VISUAL` and then `$EDITOR` are used. `{file}` and `{dir}`
-are replaced without invoking a shell.
+Update one setting at a time with the convenience commands:
+
+```sh
+leetui config language rust
+leetui config language c++       # normalized and saved as "cpp"
+leetui config workspace '~/leetcode'
+leetui config editor 'nvim {file}'
+leetui config editor 'code --wait {dir}'
+```
+
+### `config.toml` format
+
+The file contains one TOML table with exactly these three keys:
+
+```toml
+default_language = "cpp"
+editor = ["nvim", "{file}"]
+workspace = "/home/alice/leetcode"
+```
+
+Unknown keys are rejected so that spelling mistakes do not silently do nothing.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `default_language` | string | LeetCode language slug used when creating a new workspace |
+| `editor` | array of strings | One editor command represented as an argument vector |
+| `workspace` | path string | Parent directory for generated problem workspaces |
+
+The CLI key `language` updates the TOML key `default_language`. The CLI expands a leading `~` in
+the workspace path; a leading `~` in `config.toml` is also expanded when the file is loaded.
+
+On Windows, a TOML literal string avoids escaping backslashes:
+
+```toml
+workspace = 'C:\Users\alice\leetcode'
+editor = ["code", "--wait", "{dir}"]
+```
+
+### Editor command
+
+`editor` is **one command**, not a list of editors. Its first array element is the executable and
+the remaining elements are arguments. Therefore this output is correct:
+
+```toml
+editor = ["nvim", "{file}"]
+```
+
+It means “run `nvim` with the solution path as its argument.” The command
+`leetui config editor 'nvim {file}'` parses the quoted value and replaces the entire array. Quote
+the whole value so the shell passes it as one CLI argument. For paths or arguments with complex
+quoting, edit the TOML array directly instead.
+
+Supported placeholders are:
+
+- `{file}` — absolute path to the solution file.
+- `{dir}` — absolute path to the problem workspace.
+
+Placeholders are replaced in individual arguments. No shell is invoked, so pipes, redirects,
+command substitution, and shell variable expansion are not supported. If no placeholder appears,
+the solution path is appended automatically. An empty array (`editor = []`) uses `$VISUAL`, then
+`$EDITOR`; those environment values are tokenized using the same command-line parser.
+
+### Language values
+
+Languages are stored using the `langSlug` returned by LeetCode. Common values include:
+
+| Language | Value |
+|---|---|
+| C++ | `cpp` |
+| C | `c` |
+| C# | `csharp` |
+| Java | `java` |
+| Python 3 | `python3` |
+| Python | `python` |
+| JavaScript | `javascript` |
+| TypeScript | `typescript` |
+| Go | `golang` |
+| Rust | `rust` |
+| Kotlin | `kotlin` |
+| Swift | `swift` |
+| Ruby | `ruby` |
+| PHP | `php` |
+| MySQL / MS SQL / Oracle | `mysql` / `mssql` / `oraclesql` |
+
+Common aliases such as `c++`, `c#`, `go`, `js`, `ts`, `py`, and `rs` are accepted by configuration
+commands and `--lang`, then normalized to LeetCode's value. Not every problem supplies starter code
+for every language; an error now lists the languages available for that problem.
+
+The configured default applies only when creating a workspace. An existing workspace keeps the
+language recorded in its `.leetui.toml`. Switch one deliberately with, for example:
+
+```sh
+leetui edit two-sum --lang c++
+```
 
 Default paths follow the platform's standard directories. On Linux:
 
