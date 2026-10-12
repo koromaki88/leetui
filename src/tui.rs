@@ -50,6 +50,12 @@ struct App {
     image: Option<StatefulProtocol>,
     confirm_submit: bool,
     pending_submission: Option<WorkspaceEntry>,
+    pending_statement_refresh: Option<PendingStatementRefresh>,
+}
+
+struct PendingStatementRefresh {
+    entry: WorkspaceEntry,
+    problem: Problem,
 }
 
 pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
@@ -83,6 +89,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
         image: None,
         confirm_submit: false,
         pending_submission: None,
+        pending_statement_refresh: None,
     };
 
     let image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
@@ -96,6 +103,45 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        if app.pending_statement_refresh.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    let pending = app
+                        .pending_statement_refresh
+                        .take()
+                        .context("no statement refresh is pending")?;
+                    match workspace::refresh_statement(&pending.entry, &pending.problem) {
+                        Ok(workspace::StatementRefresh::Updated { path, backup }) => {
+                            set_problem_statement(&mut app, pending.problem)?;
+                            app.status = format!(
+                                "Refreshed {}; backup {}",
+                                path.display(),
+                                backup.display()
+                            );
+                        }
+                        Ok(workspace::StatementRefresh::Created { path }) => {
+                            set_problem_statement(&mut app, pending.problem)?;
+                            app.status = format!("Created {}", path.display());
+                        }
+                        Ok(workspace::StatementRefresh::Unchanged { path }) => {
+                            set_problem_statement(&mut app, pending.problem)?;
+                            app.status = format!("Statement already current: {}", path.display());
+                        }
+                        Err(error) => app.set_error(error),
+                    }
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    app.pending_statement_refresh = None;
+                    app.status = "Statement refresh cancelled".into();
+                }
+                _ => {
+                    app.status = "Replace problem.md? y confirms with backup; n/Esc cancels".into();
+                }
+            }
+            guard.terminal.draw(|frame| draw(frame, &mut app))?;
             continue;
         }
 
@@ -184,6 +230,13 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                         Err(error) => app.set_error(error),
                     }
                 }
+                KeyCode::Char('R') => {
+                    app.status = "Fetching latest statement…".into();
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
+                    if let Err(error) = refresh_current_statement(&mut app, config, service).await {
+                        app.set_error(error);
+                    }
+                }
                 KeyCode::Char('e') => {
                     let result = edit_current(&mut app, config, service, &mut guard).await;
                     if let Err(error) = result {
@@ -249,15 +302,58 @@ async fn open_selected(app: &mut App, service: &AppService<'_>) -> Result<()> {
         .context("no problem is selected")?
         .clone();
     let problem = service.problem(&summary.title_slug, false).await?;
-    let markdown = statement_markdown(&problem.content)?;
-    app.image_urls = image_urls(&markdown);
-    set_document(app, terminal_lines(&markdown), "Statement");
-    app.problem = Some(problem);
+    set_problem_statement(app, problem)?;
     app.result = None;
     app.image = None;
     app.scroll = 0;
     app.view = View::Problem;
-    app.status = "j/k scroll  p prepare  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back".into();
+    app.status = "j/k scroll  p prepare  R refresh  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back".into();
+    Ok(())
+}
+
+fn set_problem_statement(app: &mut App, problem: Problem) -> Result<()> {
+    let markdown = statement_markdown(&problem.content)?;
+    app.image_urls = image_urls(&markdown);
+    set_document(app, terminal_lines(&markdown), "Statement");
+    app.problem = Some(problem);
+    app.image = None;
+    Ok(())
+}
+
+async fn refresh_current_statement(
+    app: &mut App,
+    config: &Config,
+    service: &AppService<'_>,
+) -> Result<()> {
+    let slug = app
+        .problem
+        .as_ref()
+        .context("no problem is open")?
+        .title_slug
+        .clone();
+    let (entry, problem) = service.statement_refresh_target(config, &slug).await?;
+    match workspace::statement_state(&entry, &problem)? {
+        workspace::StatementState::Current => {
+            set_problem_statement(app, problem)?;
+            app.status = format!(
+                "Statement already current: {}",
+                entry.directory.join("problem.md").display()
+            );
+        }
+        workspace::StatementState::Missing => {
+            match workspace::refresh_statement(&entry, &problem)? {
+                workspace::StatementRefresh::Created { path } => {
+                    app.status = format!("Created {}", path.display());
+                }
+                _ => app.status = "Statement refreshed".into(),
+            }
+            set_problem_statement(app, problem)?;
+        }
+        workspace::StatementState::Different => {
+            app.pending_statement_refresh = Some(PendingStatementRefresh { entry, problem });
+            app.status = "Replace problem.md? y confirms with backup; n/Esc cancels".into();
+        }
+    }
     Ok(())
 }
 

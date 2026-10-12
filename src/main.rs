@@ -50,6 +50,13 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
+    /// Refresh a workspace's problem.md from LeetCode.
+    Refresh {
+        target: String,
+        /// Skip the interactive confirmation when the existing file differs.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Create a local solution workspace.
     Pick(TargetArgs),
     /// Create/reopen a solution in the configured editor.
@@ -153,7 +160,11 @@ async fn main() -> Result<()> {
             let config = if matches!(
                 command,
                 None | Some(
-                    Command::Pick(_) | Command::Edit(_) | Command::Run(_) | Command::Submit(_)
+                    Command::Pick(_)
+                        | Command::Edit(_)
+                        | Command::Run(_)
+                        | Command::Submit(_)
+                        | Command::Refresh { .. }
                 )
             ) {
                 Some(Config::load(&paths)?)
@@ -210,6 +221,41 @@ async fn dispatch(
                     .join(", ")
             );
             println!("{}", statement_markdown(&problem.content)?);
+            Ok(())
+        }
+        Some(Command::Refresh { target, yes }) => {
+            let config = config.context("configuration was not loaded")?;
+            let (entry, problem) = service.statement_refresh_target(config, &target).await?;
+            let state = workspace::statement_state(&entry, &problem)?;
+            if state == workspace::StatementState::Current {
+                println!(
+                    "Statement is already current: {}",
+                    entry.directory.join("problem.md").display()
+                );
+                return Ok(());
+            }
+            if state == workspace::StatementState::Different
+                && !yes
+                && !confirm_action(&format!(
+                    "Replace {} with the latest statement? The current file will be backed up. [y/N] ",
+                    entry.directory.join("problem.md").display()
+                ))?
+            {
+                println!("Cancelled.");
+                return Ok(());
+            }
+            match workspace::refresh_statement(&entry, &problem)? {
+                workspace::StatementRefresh::Created { path } => {
+                    println!("Created {}.", path.display());
+                }
+                workspace::StatementRefresh::Unchanged { path } => {
+                    println!("Statement is already current: {}", path.display());
+                }
+                workspace::StatementRefresh::Updated { path, backup } => {
+                    println!("Refreshed {}.", path.display());
+                    println!("Backup: {}", backup.display());
+                }
+            }
             Ok(())
         }
         Some(Command::Pick(args)) => {
@@ -396,21 +442,28 @@ async fn submit_code(config: &Config, service: &AppService<'_>, args: SubmitArgs
         .workspace(config, &args.target, args.lang.as_deref())
         .await?;
     let problem = service.problem(&entry.meta.slug, false).await?;
-    if !args.yes {
-        eprint!("Submit {} ({})? [y/N] ", problem.title, entry.meta.language);
-        use std::io::Write;
-        std::io::stderr().flush()?;
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
-            println!("Cancelled.");
-            return Ok(());
-        }
+    if !args.yes
+        && !confirm_action(&format!(
+            "Submit {} ({})? [y/N] ",
+            problem.title, entry.meta.language
+        ))?
+    {
+        println!("Cancelled.");
+        return Ok(());
     }
     println!("Submitting {}…", problem.title);
     let result = service.submit_workspace(&entry).await?;
     print_judge_result(&result);
     Ok(())
+}
+
+fn confirm_action(prompt: &str) -> Result<bool> {
+    eprint!("{prompt}");
+    use std::io::Write;
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
 }
 
 fn print_judge_result(result: &JudgeResult) {

@@ -23,7 +23,43 @@ pub fn statement_markdown(html: &str) -> Result<String> {
             },
         )
         .build();
-    Ok(converter.convert(html)?)
+    Ok(add_statement_section_rules(&converter.convert(html)?))
+}
+
+fn add_statement_section_rules(markdown: &str) -> String {
+    let mut output = Vec::<String>::new();
+    let mut separated_examples = false;
+
+    for line in markdown.lines() {
+        let label = line
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .replace(['*', '_'], "")
+            .to_ascii_lowercase();
+        let starts_examples = !separated_examples
+            && (label == "example:"
+                || label.starts_with("example ")
+                || label.starts_with("example:"));
+        let starts_constraints = label == "constraints:" || label.starts_with("constraints:");
+
+        if starts_examples || starts_constraints {
+            while output.last().is_some_and(|line| line.trim().is_empty()) {
+                output.pop();
+            }
+            if output.last().is_none_or(|line| line.trim() != "---") {
+                output.push(String::new());
+                output.push("---".into());
+            }
+            output.push(String::new());
+        }
+        if starts_examples {
+            separated_examples = true;
+        }
+        output.push(line.to_owned());
+    }
+
+    output.join("\n")
 }
 
 pub fn html_fragment_markdown(html: &str) -> String {
@@ -254,5 +290,25 @@ mod tests {
         assert!(rendered.contains("one"));
         assert!(rendered.contains("`code`"));
         assert!(rendered.contains("https://leetcode.com"));
+    }
+
+    #[test]
+    fn statement_sections_have_visible_rules() {
+        let markdown = statement_markdown(
+            "<p>Description.</p><p><strong>Example 1:</strong></p><p>First</p><p><strong>Example 2:</strong></p><p>Second</p><p><strong>Constraints:</strong></p><ul><li>One</li></ul>",
+        )
+        .unwrap();
+
+        assert_eq!(markdown.matches("---").count(), 2);
+        assert!(markdown.contains("---\n\n**Example 1:**"));
+        assert!(!markdown.contains("---\n\n**Example 2:**"));
+        assert!(markdown.contains("---\n\n**Constraints:**"));
+
+        let rendered = terminal_lines(&markdown)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("────────────────"));
     }
 }

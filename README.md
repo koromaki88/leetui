@@ -91,6 +91,7 @@ Useful commands:
 ```sh
 leetui list --difficulty medium --tag array
 leetui show two-sum
+leetui refresh two-sum
 leetui editorial two-sum
 leetui pick two-sum --lang rust
 leetui edit two-sum
@@ -232,6 +233,13 @@ reuse the same extension (for example, `python3` to `python`), leetui creates a 
 as `solution.python.py` rather than treating the existing `solution.py` as code for the new
 language.
 
+Refresh a prepared statement from LeetCode with `leetui refresh TARGET`, or press `R` while viewing
+the problem in the TUI. If `problem.md` already matches the generated statement, no file is written.
+If it differs, leetui asks for confirmation, saves the previous contents under
+`.leetui-backups/problem.md.bak` (using a numbered suffix when needed), and atomically replaces the
+statement. Use `--yes` to skip the CLI confirmation. Missing statement files are recreated without
+a backup.
+
 ## TUI keys
 
 | Key | Action |
@@ -242,6 +250,7 @@ language.
 | `Tab` | Load official editorial |
 | `i` | Preview the first statement image |
 | `p` | Prepare workspace files without opening an editor |
+| `R` | Refresh `problem.md`, backing up a differing file |
 | `e` | Open solution in configured editor |
 | `r` | Run the sample testcase |
 | `S` | Confirm and submit the current solution |

@@ -92,6 +92,31 @@ impl<'a> AppService<'a> {
         workspace::prepare(config, &problem, language.as_deref())
     }
 
+    pub async fn statement_refresh_target(
+        &self,
+        config: &Config,
+        target: &str,
+    ) -> Result<(WorkspaceEntry, Problem)> {
+        let path = Path::new(target);
+        if path.exists() {
+            let entry = workspace::from_path(path)?;
+            let problem = self.problem(&entry.meta.slug, true).await?;
+            return Ok((entry, problem));
+        }
+
+        let problem = self.problem(target, true).await?;
+        let directory = workspace::problem_directory(config, &problem);
+        if !directory.exists() {
+            bail!(
+                "no workspace exists for `{}`; use `leetui pick {}` first",
+                problem.title_slug,
+                problem.title_slug
+            );
+        }
+        let entry = workspace::from_path(&directory)?;
+        Ok((entry, problem))
+    }
+
     pub async fn run_workspace(&self, entry: &WorkspaceEntry, input: &str) -> Result<JudgeResult> {
         let problem = self.problem(&entry.meta.slug, false).await?;
         let code = fs::read_to_string(&entry.solution)
