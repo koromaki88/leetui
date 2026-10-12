@@ -5,7 +5,7 @@ use std::{
     sync::Mutex,
 };
 
-use atomicwrites::{AllowOverwrite, AtomicFile};
+use atomicwrites::{AllowOverwrite, AtomicFile, DisallowOverwrite, OverwriteBehavior};
 
 // Serialize this process's commits. Windows can reject simultaneous
 // MoveFileExW replacements of the same directory entry with ERROR_ACCESS_DENIED
@@ -18,6 +18,15 @@ static WRITE_MUTEX: Mutex<()> = Mutex::new(());
 /// transient Windows replacement conflicts from other processes are retried.
 /// Temporary files start with mode 0600 on Unix.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with(path, bytes, AllowOverwrite)
+}
+
+/// Creates a file atomically and fails if the destination already exists.
+pub fn atomic_write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with(path, bytes, DisallowOverwrite)
+}
+
+fn atomic_write_with(path: &Path, bytes: &[u8], overwrite: OverwriteBehavior) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
@@ -26,10 +35,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let _guard = WRITE_MUTEX
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    replace_with_retry(path, bytes)
+    replace_with_retry(path, bytes, overwrite)
 }
 
-fn replace_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn replace_once(path: &Path, bytes: &[u8], overwrite: OverwriteBehavior) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -38,7 +47,7 @@ fn replace_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
         options.mode(0o600);
     }
 
-    AtomicFile::new(path, AllowOverwrite)
+    AtomicFile::new(path, overwrite)
         .write_with_options(
             |file| {
                 file.write_all(bytes)?;
@@ -50,18 +59,18 @@ fn replace_once(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_with_retry(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    replace_once(path, bytes)
+fn replace_with_retry(path: &Path, bytes: &[u8], overwrite: OverwriteBehavior) -> io::Result<()> {
+    replace_once(path, bytes, overwrite)
 }
 
 #[cfg(windows)]
-fn replace_with_retry(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn replace_with_retry(path: &Path, bytes: &[u8], overwrite: OverwriteBehavior) -> io::Result<()> {
     use std::{thread, time::Duration};
 
     const MAX_ATTEMPTS: u32 = 16;
     let mut delay_ms = 1_u64;
     for attempt in 0..MAX_ATTEMPTS {
-        match replace_once(path, bytes) {
+        match replace_once(path, bytes, overwrite) {
             Ok(()) => return Ok(()),
             Err(error)
                 if attempt + 1 < MAX_ATTEMPTS && is_transient_windows_replace_error(&error) =>
@@ -82,4 +91,18 @@ fn replace_with_retry(path: &Path, bytes: &[u8]) -> io::Result<()> {
 fn is_transient_windows_replace_error(error: &io::Error) -> bool {
     // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
     matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_create_never_overwrites_an_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("value.txt");
+        atomic_write_new(&path, b"first").unwrap();
+        assert!(atomic_write_new(&path, b"second").is_err());
+        assert_eq!(fs::read(path).unwrap(), b"first");
+    }
 }

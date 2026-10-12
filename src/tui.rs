@@ -4,7 +4,7 @@ use std::{
     io::{self, Cursor, stdout},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -25,13 +25,15 @@ use crate::{
     cache,
     config::Config,
     document::{image_urls, statement_markdown, terminal_lines},
-    model::{JudgeResult, Problem, ProblemSummary},
+    model::{JudgeResult, Problem, ProblemSummary, SubmissionSummary},
+    submission_export::SubmissionSave,
     workspace::{self, WorkspaceEntry},
 };
 
 enum View {
     Browser,
     Problem,
+    Submissions,
 }
 
 struct App {
@@ -52,6 +54,8 @@ struct App {
     pending_submission: Option<WorkspaceEntry>,
     pending_statement_refresh: Option<PendingStatementRefresh>,
     pending_solution_reset: Option<PendingSolutionReset>,
+    submissions: Vec<SubmissionSummary>,
+    submission_selected: usize,
 }
 
 struct PendingStatementRefresh {
@@ -97,6 +101,8 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
         pending_submission: None,
         pending_statement_refresh: None,
         pending_solution_reset: None,
+        submissions: Vec::new(),
+        submission_selected: 0,
     };
 
     let image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
@@ -330,6 +336,36 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 }
                 _ => {}
             },
+            View::Submissions => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    let problem = app.problem.clone().context("no problem is open")?;
+                    set_problem_statement(&mut app, problem)?;
+                    app.view = View::Problem;
+                    app.status = problem_help().into();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.submission_selected =
+                        (app.submission_selected + 1).min(app.submissions.len().saturating_sub(1));
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.submission_selected = app.submission_selected.saturating_sub(1);
+                }
+                KeyCode::Char('s') => {
+                    app.status = "Saving selected submission…".into();
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
+                    if let Err(error) = save_selected_submission(&mut app, config, service).await {
+                        app.set_error(error);
+                    }
+                }
+                KeyCode::Char('A') => {
+                    if let Err(error) =
+                        save_all_submissions(&mut app, config, service, &mut guard).await
+                    {
+                        app.set_error(error);
+                    }
+                }
+                _ => {}
+            },
         }
         sync_document_scroll(&mut app);
         guard.terminal.draw(|frame| draw(frame, &mut app))?;
@@ -354,9 +390,11 @@ async fn open_selected(app: &mut App, service: &AppService<'_>) -> Result<()> {
     set_problem_statement(app, problem)?;
     app.result = None;
     app.image = None;
+    app.submissions.clear();
+    app.submission_selected = 0;
     app.scroll = 0;
     app.view = View::Problem;
-    app.status = "j/k scroll  p prepare  R refresh  X reset  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back".into();
+    app.status = problem_help().into();
     Ok(())
 }
 
@@ -503,29 +541,85 @@ async fn load_editorial(app: &mut App, service: &AppService<'_>) -> Result<()> {
 
 async fn load_submissions(app: &mut App, service: &AppService<'_>) -> Result<()> {
     let problem = app.problem.as_ref().context("no problem is open")?;
-    let submissions = service.submissions(&problem.title_slug).await?;
-    let markdown = submissions
-        .into_iter()
-        .map(|submission| {
-            format!(
-                "* `{}` — **{}**, {}, {}, {}",
-                submission.id,
-                submission.status_display,
-                submission.lang,
-                submission.runtime.unwrap_or_else(|| "-".into()),
-                submission.memory.unwrap_or_else(|| "-".into())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    set_document(
-        app,
-        terminal_lines(&format!("# My submissions\n\n{markdown}")),
-        "My submissions",
-    );
+    app.submissions = service.submissions(&problem.title_slug).await?;
+    app.submission_selected = 0;
+    app.view = View::Submissions;
     app.image_urls.clear();
-    app.status = "Showing submissions; reopen problem to return".into();
+    app.image = None;
+    app.result = None;
+    app.status = "j/k select  s save selected  A save all  Esc back".into();
     Ok(())
+}
+
+async fn save_selected_submission(
+    app: &mut App,
+    config: &Config,
+    service: &AppService<'_>,
+) -> Result<()> {
+    let submission = app
+        .submissions
+        .get(app.submission_selected)
+        .context("no submission is selected")?
+        .clone();
+    let slug = app
+        .problem
+        .as_ref()
+        .context("no problem is open")?
+        .title_slug
+        .clone();
+    let entry = service.submission_workspace(config, &slug).await?;
+    app.status = match service.save_submission(&entry, &submission).await? {
+        SubmissionSave::Saved { path } => format!("Saved {}", path.display()),
+        SubmissionSave::Unchanged { path } => format!("Already saved: {}", path.display()),
+        SubmissionSave::Conflict { path } => {
+            bail!(
+                "refusing to overwrite modified local submission {}",
+                path.display()
+            )
+        }
+    };
+    Ok(())
+}
+
+async fn save_all_submissions(
+    app: &mut App,
+    config: &Config,
+    service: &AppService<'_>,
+    guard: &mut TerminalGuard,
+) -> Result<()> {
+    let submissions = app.submissions.clone();
+    if submissions.is_empty() {
+        app.status = "There are no submissions to save".into();
+        return Ok(());
+    }
+    let slug = app
+        .problem
+        .as_ref()
+        .context("no problem is open")?
+        .title_slug
+        .clone();
+    let entry = service.submission_workspace(config, &slug).await?;
+    let total = submissions.len();
+    let mut saved = 0_usize;
+    let mut unchanged = 0_usize;
+    let mut conflicts = 0_usize;
+
+    for (index, submission) in submissions.iter().enumerate() {
+        app.status = format!("Saving submission {}/{total}…", index + 1);
+        guard.terminal.draw(|frame| draw(frame, app))?;
+        match service.save_submission(&entry, submission).await? {
+            SubmissionSave::Saved { .. } => saved += 1,
+            SubmissionSave::Unchanged { .. } => unchanged += 1,
+            SubmissionSave::Conflict { .. } => conflicts += 1,
+        }
+    }
+    app.status =
+        format!("Export complete: {saved} saved, {unchanged} unchanged, {conflicts} skipped");
+    Ok(())
+}
+
+fn problem_help() -> &'static str {
+    "j/k scroll  p prepare  R refresh  X reset  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back"
 }
 
 async fn load_image(app: &mut App, service: &AppService<'_>, picker: &Picker) -> Result<()> {
@@ -603,6 +697,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     match app.view {
         View::Browser => draw_browser(frame, app),
         View::Problem => draw_problem(frame, app),
+        View::Submissions => draw_submissions(frame, app),
     }
 }
 
@@ -749,6 +844,82 @@ fn draw_problem(frame: &mut Frame, app: &mut App) {
             body_chunks[1],
         );
     }
+    frame.render_widget(
+        Paragraph::new(app.status.as_str()).style(status_bar_style()),
+        chunks[2],
+    );
+}
+
+fn draw_submissions(frame: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .split(frame.area());
+
+    let title = app
+        .problem
+        .as_ref()
+        .map(|problem| format!("{}. {}", problem.question_frontend_id, problem.title))
+        .unwrap_or_else(|| "Submissions".into());
+    frame.render_widget(
+        Paragraph::new(title)
+            .style(Style::default().add_modifier(Modifier::BOLD))
+            .block(Block::default().borders(Borders::ALL)),
+        chunks[0],
+    );
+
+    let capacity = chunks[1].height.saturating_sub(2).max(1) as usize;
+    let start = app
+        .submission_selected
+        .saturating_sub(capacity / 2)
+        .min(app.submissions.len().saturating_sub(capacity));
+    let end = (start + capacity).min(app.submissions.len());
+    let items = app.submissions[start..end]
+        .iter()
+        .map(|submission| {
+            let status_style = if submission.status_display == "Accepted" {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Red)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:>12}  ", submission.id),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{:<18}", submission.status_display), status_style),
+                Span::raw(format!(
+                    " {:<12} {:<12} {}",
+                    submission.lang,
+                    submission.runtime.as_deref().unwrap_or("-"),
+                    submission.memory.as_deref().unwrap_or("-")
+                )),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let selected =
+        (!app.submissions.is_empty()).then_some(app.submission_selected.saturating_sub(start));
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" My submissions ({}) ", app.submissions.len())),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("› "),
+        chunks[1],
+        &mut state,
+    );
     frame.render_widget(
         Paragraph::new(app.status.as_str()).style(status_bar_style()),
         chunks[2],

@@ -102,6 +102,8 @@ leetui run two-sum --examples
 leetui submit two-sum
 leetui submissions two-sum
 leetui submissions --show SUBMISSION_ID
+leetui submissions two-sum --save SUBMISSION_ID
+leetui submissions two-sum --save-all
 ```
 
 Numeric problem IDs and LeetCode problem URLs are also accepted.
@@ -264,6 +266,8 @@ confirmation.
 | `r` | Run the sample testcase |
 | `S` | Confirm and submit the current solution |
 | `m` | Show personal submissions |
+| `s` | Save the selected submission while browsing submissions |
+| `A` | Save all submissions while browsing submissions |
 | `Esc` | Close image or go back |
 | `q` | Back or quit |
 
@@ -272,6 +276,12 @@ Use the CLI `run --input` or `run --input-file` commands for custom multiline te
 Pressing `p` creates or reopens the problem workspace (`problem.md`, the starter solution, and
 `.leetui.toml`) and leaves the TUI running. This is useful when the editor is already open in
 another terminal or tmux pane. Existing solution and notes files are preserved.
+
+Saved submission source is written under `<workspace>/submissions/` using filenames such as
+`123456789.cpp`. Saving requires an existing problem workspace and authenticated LeetCode cookies.
+Files with identical contents are left unchanged. If a local file with the same submission ID has
+different contents, leetui reports or skips it instead of overwriting local changes. Bulk exports
+fetch submission details sequentially to avoid unnecessary request bursts.
 
 ## Development
 

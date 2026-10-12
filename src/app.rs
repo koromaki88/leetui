@@ -8,6 +8,7 @@ use crate::{
     config::{Config, Paths},
     language,
     model::{Editorial, JudgeResult, Problem, SubmissionDetails, SubmissionSummary},
+    submission_export::{self, SubmissionSave},
     workspace::{self, WorkspaceEntry},
 };
 
@@ -131,6 +132,14 @@ impl<'a> AppService<'a> {
             );
         }
         let entry = workspace::from_path(&directory)?;
+        if entry.meta.slug != problem.title_slug {
+            bail!(
+                "workspace {} belongs to `{}`, not `{}`",
+                entry.directory.display(),
+                entry.meta.slug,
+                problem.title_slug
+            );
+        }
         Ok((entry, problem))
     }
 
@@ -161,6 +170,26 @@ impl<'a> AppService<'a> {
 
     pub async fn submission_details(&self, id: &str) -> Result<SubmissionDetails> {
         Ok(self.client.submission_details(id).await?)
+    }
+
+    pub async fn submission_workspace(
+        &self,
+        config: &Config,
+        target: &str,
+    ) -> Result<WorkspaceEntry> {
+        let (entry, _) = self
+            .existing_workspace_problem(config, target, false)
+            .await?;
+        Ok(entry)
+    }
+
+    pub async fn save_submission(
+        &self,
+        entry: &WorkspaceEntry,
+        summary: &SubmissionSummary,
+    ) -> Result<SubmissionSave> {
+        let details = self.submission_details(&summary.id).await?;
+        submission_export::save(entry, summary, &details)
     }
 
     pub async fn image(&self, url: &str) -> Result<Vec<u8>> {

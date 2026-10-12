@@ -6,6 +6,7 @@ mod document;
 mod fsutil;
 mod language;
 mod model;
+mod submission_export;
 mod tui;
 mod workspace;
 
@@ -20,6 +21,7 @@ use crate::{
     config::{Config, Credentials, Paths, expand_home},
     document::statement_markdown,
     model::JudgeResult,
+    submission_export::SubmissionSave,
 };
 
 #[derive(Parser)]
@@ -82,8 +84,15 @@ enum Command {
     Submissions {
         /// Problem ID or slug. Required unless --show is used.
         target: Option<String>,
-        #[arg(long)]
+        /// Display one submission without saving it.
+        #[arg(long, conflicts_with_all = ["save", "save_all"])]
         show: Option<String>,
+        /// Save one submission by ID under the problem workspace.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["show", "save_all"])]
+        save: Option<String>,
+        /// Save every submission under the problem workspace.
+        #[arg(long, conflicts_with_all = ["show", "save"])]
+        save_all: bool,
     },
     /// Print or update configuration.
     Config {
@@ -173,6 +182,8 @@ async fn main() -> Result<()> {
                         | Command::Submit(_)
                         | Command::Refresh { .. }
                         | Command::Reset { .. }
+                        | Command::Submissions { save: Some(_), .. }
+                        | Command::Submissions { save_all: true, .. }
                 )
             ) {
                 Some(Config::load(&paths)?)
@@ -343,41 +354,110 @@ async fn dispatch(
             println!("# {}\n\n{}", editorial.title, editorial.content);
             Ok(())
         }
-        Some(Command::Submissions { target, show }) => {
-            if let Some(id) = show {
-                let details = service.submission_details(&id).await?;
-                println!(
-                    "Status: {}",
-                    details.status_display.as_deref().unwrap_or("unknown")
-                );
-                if let Some(runtime) = details.runtime_display {
-                    println!("Runtime: {runtime}");
-                }
-                if let Some(memory) = details.memory_display {
-                    println!("Memory: {memory}");
-                }
-                println!("\n{}", details.code);
-            } else {
-                let target =
-                    target.context("a problem target is required when listing submissions")?;
-                let slug = resolve_slug(service.paths(), &target)?;
-                for submission in service.submissions(&slug).await? {
-                    println!(
-                        "{:>12}  {:<18} {:<12} {:<12} {}",
-                        submission.id,
-                        submission.status_display,
-                        submission.lang,
-                        submission.runtime.as_deref().unwrap_or("-"),
-                        submission.memory.as_deref().unwrap_or("-")
-                    );
-                }
-            }
-            Ok(())
-        }
+        Some(Command::Submissions {
+            target,
+            show,
+            save,
+            save_all,
+        }) => submissions_command(config, service, target, show, save, save_all).await,
         Some(
             Command::Login { .. } | Command::Logout | Command::List(_) | Command::Config { .. },
         ) => unreachable!(),
     }
+}
+
+async fn submissions_command(
+    config: Option<&Config>,
+    service: &AppService<'_>,
+    target: Option<String>,
+    show: Option<String>,
+    save: Option<String>,
+    save_all: bool,
+) -> Result<()> {
+    if let Some(id) = show {
+        let details = service.submission_details(&id).await?;
+        println!(
+            "Status: {}",
+            details.status_display.as_deref().unwrap_or("unknown")
+        );
+        if let Some(runtime) = details.runtime_display {
+            println!("Runtime: {runtime}");
+        }
+        if let Some(memory) = details.memory_display {
+            println!("Memory: {memory}");
+        }
+        println!("\n{}", details.code);
+        return Ok(());
+    }
+
+    let target =
+        target.context("a problem target is required when listing or saving submissions")?;
+    let slug = resolve_slug(service.paths(), &target)?;
+    let submissions = service.submissions(&slug).await?;
+
+    if let Some(id) = save {
+        let submission = submissions
+            .iter()
+            .find(|submission| submission.id == id)
+            .with_context(|| format!("submission `{id}` was not found for `{slug}`"))?;
+        let entry = service
+            .submission_workspace(config.context("configuration was not loaded")?, &slug)
+            .await?;
+        print_submission_save(service.save_submission(&entry, submission).await?)?;
+        return Ok(());
+    }
+
+    if save_all {
+        let entry = service
+            .submission_workspace(config.context("configuration was not loaded")?, &slug)
+            .await?;
+        let mut saved = 0_usize;
+        let mut unchanged = 0_usize;
+        let mut conflicts = 0_usize;
+        for submission in &submissions {
+            match service.save_submission(&entry, submission).await? {
+                SubmissionSave::Saved { path } => {
+                    saved += 1;
+                    println!("Saved {}", path.display());
+                }
+                SubmissionSave::Unchanged { .. } => unchanged += 1,
+                SubmissionSave::Conflict { path } => {
+                    conflicts += 1;
+                    eprintln!("Skipped modified local file: {}", path.display());
+                }
+            }
+        }
+        println!(
+            "Submission export complete: {saved} saved, {unchanged} unchanged, {conflicts} skipped."
+        );
+        return Ok(());
+    }
+
+    for submission in submissions {
+        println!(
+            "{:>12}  {:<18} {:<12} {:<12} {}",
+            submission.id,
+            submission.status_display,
+            submission.lang,
+            submission.runtime.as_deref().unwrap_or("-"),
+            submission.memory.as_deref().unwrap_or("-")
+        );
+    }
+    Ok(())
+}
+
+fn print_submission_save(outcome: SubmissionSave) -> Result<()> {
+    match outcome {
+        SubmissionSave::Saved { path } => println!("Saved {}", path.display()),
+        SubmissionSave::Unchanged { path } => println!("Already saved: {}", path.display()),
+        SubmissionSave::Conflict { path } => {
+            bail!(
+                "refusing to overwrite modified local submission {}",
+                path.display()
+            )
+        }
+    }
+    Ok(())
 }
 
 async fn login(paths: &Paths, session: Option<String>, csrf: Option<String>) -> Result<()> {
@@ -617,8 +697,37 @@ mod tests {
             cli.command,
             Some(Command::Submissions {
                 target: None,
-                show: Some(id)
+                show: Some(id),
+                save: None,
+                save_all: false,
             }) if id == "123"
         ));
+    }
+
+    #[test]
+    fn submission_save_modes_are_mutually_exclusive() {
+        assert!(
+            Cli::try_parse_from([
+                "leetui",
+                "submissions",
+                "two-sum",
+                "--save",
+                "123",
+                "--save-all"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "leetui",
+                "submissions",
+                "two-sum",
+                "--show",
+                "123",
+                "--save",
+                "123"
+            ])
+            .is_err()
+        );
     }
 }
