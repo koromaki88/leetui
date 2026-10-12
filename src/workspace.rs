@@ -79,7 +79,7 @@ pub fn prepare_in(
         .map(|meta| language::normalize(&meta.language))
         .transpose()?;
     let language = requested_language
-        .or(existing_language)
+        .or_else(|| existing_language.clone())
         .unwrap_or(language::normalize(default_language)?);
     let snippet = problem
         .code_snippets
@@ -94,7 +94,7 @@ pub fn prepare_in(
                 .join(", ");
             format!("problem has no `{language}` starter code; available languages: {available}")
         })?;
-    let solution_name = format!("solution.{}", extension(&language));
+    let solution_name = solution_name(existing.as_ref(), existing_language.as_deref(), &language);
     let solution = directory.join(&solution_name);
     create_once(&solution, snippet.code.as_bytes())?;
 
@@ -121,7 +121,7 @@ pub fn prepare_in(
         question_id: problem.question_id.clone(),
         frontend_id: problem.question_frontend_id.clone(),
         language,
-        solution: PathBuf::from(&solution_name),
+        solution: solution_name,
     };
     atomic_write(
         &directory.join(META_FILE),
@@ -132,6 +132,28 @@ pub fn prepare_in(
         solution,
         meta,
     })
+}
+
+fn solution_name(
+    existing: Option<&WorkspaceMeta>,
+    existing_language: Option<&str>,
+    language: &str,
+) -> PathBuf {
+    if let (Some(meta), Some(existing_language)) = (existing, existing_language)
+        && existing_language == language
+    {
+        return meta.solution.clone();
+    }
+
+    let suffix = extension(language);
+    if existing_language.is_some_and(|existing| extension(existing) == suffix) {
+        // Some distinct LeetCode languages share a file extension, notably
+        // python/python3 and the SQL dialects. A language switch must not
+        // silently reuse source written for the previous language.
+        PathBuf::from(format!("solution.{language}.{suffix}"))
+    } else {
+        PathBuf::from(format!("solution.{suffix}"))
+    }
 }
 
 fn create_once(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -371,6 +393,45 @@ mod tests {
         assert_eq!(
             fs::read_to_string(switched.solution).unwrap(),
             "rust starter"
+        );
+    }
+
+    #[test]
+    fn same_extension_language_switch_uses_distinct_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            default_language: "python3".into(),
+            editor: Vec::new(),
+            workspace: directory.path().into(),
+        };
+        let mut problem = problem();
+        problem.code_snippets.push(crate::model::CodeSnippet {
+            lang: "Python".into(),
+            lang_slug: "python".into(),
+            code: "python starter".into(),
+        });
+
+        let original = prepare(&config, &problem, Some("python3")).unwrap();
+        fs::write(&original.solution, "user python3 code").unwrap();
+
+        let switched = prepare(&config, &problem, Some("python")).unwrap();
+        assert_eq!(original.solution.file_name().unwrap(), "solution.py");
+        assert_eq!(switched.solution.file_name().unwrap(), "solution.python.py");
+        assert_eq!(
+            fs::read_to_string(&original.solution).unwrap(),
+            "user python3 code"
+        );
+        assert_eq!(
+            fs::read_to_string(&switched.solution).unwrap(),
+            "python starter"
+        );
+
+        fs::write(&switched.solution, "user python code").unwrap();
+        let reopened = prepare(&config, &problem, None).unwrap();
+        assert_eq!(reopened.solution, switched.solution);
+        assert_eq!(
+            fs::read_to_string(&reopened.solution).unwrap(),
+            "user python code"
         );
     }
 

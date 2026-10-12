@@ -227,7 +227,10 @@ Each problem workspace contains:
 
 The selected language in `.leetui.toml` is authoritative when reopening a workspace. It changes
 only when `--lang` is explicitly supplied. `problem.md` is generated only once, so local notes
-are preserved.
+are preserved. Solution files are also created only once. If an explicit language switch would
+reuse the same extension (for example, `python3` to `python`), leetui creates a qualified file such
+as `solution.python.py` rather than treating the existing `solution.py` as code for the new
+language.
 
 ## TUI keys
 
