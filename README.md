@@ -238,6 +238,7 @@ are preserved.
 | `Enter` | Open problem |
 | `Tab` | Load official editorial |
 | `i` | Preview the first statement image |
+| `p` | Prepare workspace files without opening an editor |
 | `e` | Open solution in configured editor |
 | `r` | Run the sample testcase |
 | `S` | Confirm and submit the current solution |
@@ -246,6 +247,10 @@ are preserved.
 | `q` | Back or quit |
 
 Use the CLI `run --input` or `run --input-file` commands for custom multiline testcases.
+
+Pressing `p` creates or reopens the problem workspace (`problem.md`, the starter solution, and
+`.leetui.toml`) and leaves the TUI running. This is useful when the editor is already open in
+another terminal or tmux pane. Existing solution and notes files are preserved.
 
 ## Development
 

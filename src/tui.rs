@@ -170,6 +170,20 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                 KeyCode::PageDown => app.scroll = app.scroll.saturating_add(15),
                 KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(15),
                 KeyCode::Home => app.scroll = 0,
+                KeyCode::Char('p') => {
+                    app.status = "Preparing workspace…".into();
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
+                    match prepare_current(&app, config, service).await {
+                        Ok(entry) => {
+                            app.status = format!(
+                                "Prepared {} ({})",
+                                entry.solution.display(),
+                                entry.meta.language
+                            );
+                        }
+                        Err(error) => app.set_error(error),
+                    }
+                }
                 KeyCode::Char('e') => {
                     let result = edit_current(&mut app, config, service, &mut guard).await;
                     if let Err(error) = result {
@@ -183,7 +197,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                         app.set_error(error);
                     }
                 }
-                KeyCode::Char('S') => match prepare_submission(&app, config, service).await {
+                KeyCode::Char('S') => match prepare_current(&app, config, service).await {
                     Ok(entry) => {
                         app.status = submission_prompt(&entry);
                         app.pending_submission = Some(entry);
@@ -243,7 +257,7 @@ async fn open_selected(app: &mut App, service: &AppService<'_>) -> Result<()> {
     app.image = None;
     app.scroll = 0;
     app.view = View::Problem;
-    app.status = "j/k scroll  Tab editorial  i image  e edit  r run sample  S submit  m submissions  Esc back".into();
+    app.status = "j/k scroll  p prepare  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back".into();
     Ok(())
 }
 
@@ -279,14 +293,14 @@ async fn run_current(app: &mut App, config: &Config, service: &AppService<'_>) -
 async fn submit_current(app: &mut App, config: &Config, service: &AppService<'_>) -> Result<()> {
     let entry = match app.pending_submission.take() {
         Some(entry) => entry,
-        None => prepare_submission(app, config, service).await?,
+        None => prepare_current(app, config, service).await?,
     };
     app.result = Some(service.submit_workspace(&entry).await?);
     app.status = "Submission finished".into();
     Ok(())
 }
 
-async fn prepare_submission(
+async fn prepare_current(
     app: &App,
     config: &Config,
     service: &AppService<'_>,
