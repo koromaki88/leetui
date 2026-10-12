@@ -45,6 +45,20 @@ pub enum StatementRefresh {
     Updated { path: PathBuf, backup: PathBuf },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolutionState {
+    Missing,
+    Current,
+    Different,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SolutionReset {
+    Created { path: PathBuf },
+    Unchanged { path: PathBuf },
+    Reset { path: PathBuf, backup: PathBuf },
+}
+
 /// Opens an existing workspace without changing its language, unless
 /// `requested_language` explicitly asks for a switch. New workspaces use the
 /// requested language or the configured default.
@@ -99,22 +113,10 @@ pub fn prepare_in(
     let language = requested_language
         .or_else(|| existing_language.clone())
         .unwrap_or(language::normalize(default_language)?);
-    let snippet = problem
-        .code_snippets
-        .iter()
-        .find(|snippet| snippet.lang_slug == language)
-        .with_context(|| {
-            let available = problem
-                .code_snippets
-                .iter()
-                .map(|snippet| snippet.lang_slug.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("problem has no `{language}` starter code; available languages: {available}")
-        })?;
+    let starter = starter_code(problem, &language)?;
     let solution_name = solution_name(existing.as_ref(), existing_language.as_deref(), &language);
     let solution = directory.join(&solution_name);
-    create_once(&solution, snippet.code.as_bytes())?;
+    create_once(&solution, starter.as_bytes())?;
 
     let statement_path = directory.join("problem.md");
     if !statement_path.exists() {
@@ -177,7 +179,7 @@ pub fn refresh_statement(entry: &WorkspaceEntry, problem: &Problem) -> Result<St
     match fs::read(&path) {
         Ok(current) if current == expected.as_bytes() => Ok(StatementRefresh::Unchanged { path }),
         Ok(current) => {
-            let backup = backup_statement(&entry.directory, &current)?;
+            let backup = backup_file(&entry.directory, "problem.md", &current)?;
             atomic_write(&path, expected.as_bytes())
                 .with_context(|| format!("failed to refresh {}", path.display()))?;
             Ok(StatementRefresh::Updated { path, backup })
@@ -193,6 +195,51 @@ pub fn refresh_statement(entry: &WorkspaceEntry, problem: &Problem) -> Result<St
     }
 }
 
+pub fn solution_state(entry: &WorkspaceEntry, problem: &Problem) -> Result<SolutionState> {
+    ensure_problem_matches(entry, problem)?;
+    let starter = starter_code(problem, &entry.meta.language)?;
+    match fs::read(&entry.solution) {
+        Ok(current) if current == starter.as_bytes() => Ok(SolutionState::Current),
+        Ok(_) => Ok(SolutionState::Different),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SolutionState::Missing),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read solution from {}", entry.solution.display())),
+    }
+}
+
+pub fn reset_solution(entry: &WorkspaceEntry, problem: &Problem) -> Result<SolutionReset> {
+    ensure_problem_matches(entry, problem)?;
+    let starter = starter_code(problem, &entry.meta.language)?;
+    match fs::read(&entry.solution) {
+        Ok(current) if current == starter.as_bytes() => Ok(SolutionReset::Unchanged {
+            path: entry.solution.clone(),
+        }),
+        Ok(current) => {
+            let name = entry
+                .solution
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("solution file name is not valid UTF-8")?;
+            let backup = backup_file(&entry.directory, name, &current)?;
+            atomic_write(&entry.solution, starter.as_bytes())
+                .with_context(|| format!("failed to reset {}", entry.solution.display()))?;
+            Ok(SolutionReset::Reset {
+                path: entry.solution.clone(),
+                backup,
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            atomic_write(&entry.solution, starter.as_bytes())
+                .with_context(|| format!("failed to create {}", entry.solution.display()))?;
+            Ok(SolutionReset::Created {
+                path: entry.solution.clone(),
+            })
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read solution from {}", entry.solution.display())),
+    }
+}
+
 fn ensure_problem_matches(entry: &WorkspaceEntry, problem: &Problem) -> Result<()> {
     if entry.meta.slug != problem.title_slug {
         bail!(
@@ -205,15 +252,15 @@ fn ensure_problem_matches(entry: &WorkspaceEntry, problem: &Problem) -> Result<(
     Ok(())
 }
 
-fn backup_statement(directory: &Path, contents: &[u8]) -> Result<PathBuf> {
+fn backup_file(directory: &Path, file_name: &str, contents: &[u8]) -> Result<PathBuf> {
     let backup_directory = directory.join(".leetui-backups");
     fs::create_dir_all(&backup_directory)?;
 
     for index in 0_u32.. {
         let name = if index == 0 {
-            "problem.md.bak".into()
+            format!("{file_name}.bak")
         } else {
-            format!("problem.md.bak.{index}")
+            format!("{file_name}.bak.{index}")
         };
         let path = backup_directory.join(name);
         match fs::OpenOptions::new()
@@ -235,6 +282,23 @@ fn backup_statement(directory: &Path, contents: &[u8]) -> Result<PathBuf> {
         }
     }
     unreachable!("the backup sequence cannot be exhausted")
+}
+
+fn starter_code<'a>(problem: &'a Problem, language: &str) -> Result<&'a str> {
+    problem
+        .code_snippets
+        .iter()
+        .find(|snippet| snippet.lang_slug == language)
+        .map(|snippet| snippet.code.as_str())
+        .with_context(|| {
+            let available = problem
+                .code_snippets
+                .iter()
+                .map(|snippet| snippet.lang_slug.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("problem has no `{language}` starter code; available languages: {available}")
+        })
 }
 
 fn solution_name(
@@ -530,6 +594,52 @@ mod tests {
             refresh_statement(&entry, &problem).unwrap(),
             StatementRefresh::Unchanged { .. }
         ));
+    }
+
+    #[test]
+    fn solution_reset_backs_up_only_the_active_solution() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            default_language: "rust".into(),
+            editor: Vec::new(),
+            workspace: directory.path().into(),
+        };
+        let problem = problem();
+        let entry = prepare(&config, &problem, None).unwrap();
+        let other_language = entry.directory.join("solution.py");
+        fs::write(&other_language, "python user code").unwrap();
+        fs::write(&entry.solution, "rust user code").unwrap();
+
+        assert_eq!(
+            solution_state(&entry, &problem).unwrap(),
+            SolutionState::Different
+        );
+        let SolutionReset::Reset { path, backup } = reset_solution(&entry, &problem).unwrap()
+        else {
+            panic!("expected a reset solution");
+        };
+        assert_eq!(path, entry.solution);
+        assert_eq!(fs::read_to_string(backup).unwrap(), "rust user code");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "rust starter");
+        assert_eq!(
+            fs::read_to_string(other_language).unwrap(),
+            "python user code"
+        );
+        assert!(matches!(
+            reset_solution(&entry, &problem).unwrap(),
+            SolutionReset::Unchanged { .. }
+        ));
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            solution_state(&entry, &problem).unwrap(),
+            SolutionState::Missing
+        );
+        assert!(matches!(
+            reset_solution(&entry, &problem).unwrap(),
+            SolutionReset::Created { .. }
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), "rust starter");
     }
 
     #[test]

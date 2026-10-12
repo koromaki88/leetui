@@ -92,6 +92,7 @@ Useful commands:
 leetui list --difficulty medium --tag array
 leetui show two-sum
 leetui refresh two-sum
+leetui reset two-sum
 leetui editorial two-sum
 leetui pick two-sum --lang rust
 leetui edit two-sum
@@ -240,6 +241,13 @@ If it differs, leetui asks for confirmation, saves the previous contents under
 statement. Use `--yes` to skip the CLI confirmation. Missing statement files are recreated without
 a backup.
 
+Restore the active solution to LeetCode's starter code with `leetui reset TARGET`, or press `X`
+while viewing the problem in the TUI. Modified source is saved under
+`.leetui-backups/<solution-file>.bak` before the solution is atomically reset. Numbered suffixes
+preserve earlier backups. An unchanged solution is left alone, a missing active solution is
+recreated, and other language solution files are never modified. Use `--yes` to skip the CLI
+confirmation.
+
 ## TUI keys
 
 | Key | Action |
@@ -251,6 +259,7 @@ a backup.
 | `i` | Preview the first statement image |
 | `p` | Prepare workspace files without opening an editor |
 | `R` | Refresh `problem.md`, backing up a differing file |
+| `X` | Reset the active solution to starter code with a backup |
 | `e` | Open solution in configured editor |
 | `r` | Run the sample testcase |
 | `S` | Confirm and submit the current solution |

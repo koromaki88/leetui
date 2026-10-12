@@ -97,14 +97,31 @@ impl<'a> AppService<'a> {
         config: &Config,
         target: &str,
     ) -> Result<(WorkspaceEntry, Problem)> {
+        self.existing_workspace_problem(config, target, true).await
+    }
+
+    pub async fn solution_reset_target(
+        &self,
+        config: &Config,
+        target: &str,
+    ) -> Result<(WorkspaceEntry, Problem)> {
+        self.existing_workspace_problem(config, target, false).await
+    }
+
+    async fn existing_workspace_problem(
+        &self,
+        config: &Config,
+        target: &str,
+        refresh_problem: bool,
+    ) -> Result<(WorkspaceEntry, Problem)> {
         let path = Path::new(target);
         if path.exists() {
             let entry = workspace::from_path(path)?;
-            let problem = self.problem(&entry.meta.slug, true).await?;
+            let problem = self.problem(&entry.meta.slug, refresh_problem).await?;
             return Ok((entry, problem));
         }
 
-        let problem = self.problem(target, true).await?;
+        let problem = self.problem(target, refresh_problem).await?;
         let directory = workspace::problem_directory(config, &problem);
         if !directory.exists() {
             bail!(

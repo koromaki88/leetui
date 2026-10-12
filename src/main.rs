@@ -57,6 +57,13 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Restore the active solution to LeetCode's starter code.
+    Reset {
+        target: String,
+        /// Skip the interactive confirmation when the solution differs.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Create a local solution workspace.
     Pick(TargetArgs),
     /// Create/reopen a solution in the configured editor.
@@ -165,6 +172,7 @@ async fn main() -> Result<()> {
                         | Command::Run(_)
                         | Command::Submit(_)
                         | Command::Refresh { .. }
+                        | Command::Reset { .. }
                 )
             ) {
                 Some(Config::load(&paths)?)
@@ -253,6 +261,43 @@ async fn dispatch(
                 }
                 workspace::StatementRefresh::Updated { path, backup } => {
                     println!("Refreshed {}.", path.display());
+                    println!("Backup: {}", backup.display());
+                }
+            }
+            Ok(())
+        }
+        Some(Command::Reset { target, yes }) => {
+            let config = config.context("configuration was not loaded")?;
+            let (entry, problem) = service.solution_reset_target(config, &target).await?;
+            let state = workspace::solution_state(&entry, &problem)?;
+            if state == workspace::SolutionState::Current {
+                println!(
+                    "Solution already matches the `{}` starter: {}",
+                    entry.meta.language,
+                    entry.solution.display()
+                );
+                return Ok(());
+            }
+            if state == workspace::SolutionState::Different
+                && !yes
+                && !confirm_action(&format!(
+                    "Reset {} to the `{}` starter? The current file will be backed up. [y/N] ",
+                    entry.solution.display(),
+                    entry.meta.language
+                ))?
+            {
+                println!("Cancelled.");
+                return Ok(());
+            }
+            match workspace::reset_solution(&entry, &problem)? {
+                workspace::SolutionReset::Created { path } => {
+                    println!("Created {} from starter code.", path.display());
+                }
+                workspace::SolutionReset::Unchanged { path } => {
+                    println!("Solution already matches starter code: {}", path.display());
+                }
+                workspace::SolutionReset::Reset { path, backup } => {
+                    println!("Reset {}.", path.display());
                     println!("Backup: {}", backup.display());
                 }
             }

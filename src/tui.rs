@@ -51,9 +51,15 @@ struct App {
     confirm_submit: bool,
     pending_submission: Option<WorkspaceEntry>,
     pending_statement_refresh: Option<PendingStatementRefresh>,
+    pending_solution_reset: Option<PendingSolutionReset>,
 }
 
 struct PendingStatementRefresh {
+    entry: WorkspaceEntry,
+    problem: Problem,
+}
+
+struct PendingSolutionReset {
     entry: WorkspaceEntry,
     problem: Problem,
 }
@@ -90,6 +96,7 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
         confirm_submit: false,
         pending_submission: None,
         pending_statement_refresh: None,
+        pending_solution_reset: None,
     };
 
     let image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
@@ -103,6 +110,41 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        if app.pending_solution_reset.is_some() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    let pending = app
+                        .pending_solution_reset
+                        .take()
+                        .context("no solution reset is pending")?;
+                    match workspace::reset_solution(&pending.entry, &pending.problem) {
+                        Ok(workspace::SolutionReset::Reset { path, backup }) => {
+                            app.status =
+                                format!("Reset {}; backup {}", path.display(), backup.display());
+                        }
+                        Ok(workspace::SolutionReset::Created { path }) => {
+                            app.status = format!("Created {} from starter code", path.display());
+                        }
+                        Ok(workspace::SolutionReset::Unchanged { path }) => {
+                            app.status =
+                                format!("Solution already matches starter: {}", path.display());
+                        }
+                        Err(error) => app.set_error(error),
+                    }
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    app.pending_solution_reset = None;
+                    app.status = "Solution reset cancelled".into();
+                }
+                _ => {
+                    app.status =
+                        "Reset active solution? y confirms with backup; n/Esc cancels".into();
+                }
+            }
+            guard.terminal.draw(|frame| draw(frame, &mut app))?;
             continue;
         }
 
@@ -237,6 +279,13 @@ pub async fn run(config: &Config, service: &AppService<'_>) -> Result<()> {
                         app.set_error(error);
                     }
                 }
+                KeyCode::Char('X') => {
+                    app.status = "Checking active solution…".into();
+                    guard.terminal.draw(|frame| draw(frame, &mut app))?;
+                    if let Err(error) = reset_current_solution(&mut app, config, service).await {
+                        app.set_error(error);
+                    }
+                }
                 KeyCode::Char('e') => {
                     let result = edit_current(&mut app, config, service, &mut guard).await;
                     if let Err(error) = result {
@@ -307,7 +356,7 @@ async fn open_selected(app: &mut App, service: &AppService<'_>) -> Result<()> {
     app.image = None;
     app.scroll = 0;
     app.view = View::Problem;
-    app.status = "j/k scroll  p prepare  R refresh  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back".into();
+    app.status = "j/k scroll  p prepare  R refresh  X reset  e edit  r run  S submit  Tab editorial  i image  m submissions  Esc back".into();
     Ok(())
 }
 
@@ -352,6 +401,40 @@ async fn refresh_current_statement(
         workspace::StatementState::Different => {
             app.pending_statement_refresh = Some(PendingStatementRefresh { entry, problem });
             app.status = "Replace problem.md? y confirms with backup; n/Esc cancels".into();
+        }
+    }
+    Ok(())
+}
+
+async fn reset_current_solution(
+    app: &mut App,
+    config: &Config,
+    service: &AppService<'_>,
+) -> Result<()> {
+    let slug = app
+        .problem
+        .as_ref()
+        .context("no problem is open")?
+        .title_slug
+        .clone();
+    let (entry, problem) = service.solution_reset_target(config, &slug).await?;
+    match workspace::solution_state(&entry, &problem)? {
+        workspace::SolutionState::Current => {
+            app.status = format!(
+                "Solution already matches the `{}` starter: {}",
+                entry.meta.language,
+                entry.solution.display()
+            );
+        }
+        workspace::SolutionState::Missing => match workspace::reset_solution(&entry, &problem)? {
+            workspace::SolutionReset::Created { path } => {
+                app.status = format!("Created {} from starter code", path.display());
+            }
+            _ => app.status = "Solution reset".into(),
+        },
+        workspace::SolutionState::Different => {
+            app.pending_solution_reset = Some(PendingSolutionReset { entry, problem });
+            app.status = "Reset active solution? y confirms with backup; n/Esc cancels".into();
         }
     }
     Ok(())
